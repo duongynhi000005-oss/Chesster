@@ -2,9 +2,9 @@
  * chess.ts
  *
  * Shared types for the board's analysis annotation overlay (right-click
- * arrows and square highlights). Squares are represented as [row, col]
- * tuples, matching the rest of the codebase (see MoveRecord in game.ts)
- * rather than algebraic notation.
+ * arrows and square highlights) and drag-and-drop state. Squares are
+ * represented as [row, col] tuples, matching the rest of the codebase
+ * (see MoveRecord in game.ts) rather than algebraic notation.
  */
 
 export type AnnotationColor = "green" | "red" | "yellow" | "blue";
@@ -19,4 +19,22 @@ export interface AnnotationArrow {
 	from: [number, number];
 	to: [number, number];
 	color: AnnotationColor;
+}
+
+export interface DragPieceState {
+	row: number;
+	col: number;
+	piece: string;
+	pointerId: number;
+	pointerType: string;
+	x: number;
+	y: number;
+	hoveredSquare?: [number, number] | null;
+}
+
+export interface DragPreviewState {
+	isActive: boolean;
+	sourceSquare: [number, number] | null;
+	hoveredSquare: [number, number] | null;
+	isLegalTarget: boolean;
 }

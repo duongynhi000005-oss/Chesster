@@ -53,7 +53,7 @@ function tokenLabel(addr: string | null | undefined): string {
 }
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import type { AnnotationArrow, AnnotationColor, SquareHighlight } from "../types/chess";
+import type { AnnotationArrow, AnnotationColor, SquareHighlight, DragPieceState } from "../types/chess";
 import { BoardAnnotations } from "./BoardAnnotations";
 import {
   getPossibleMoves,
@@ -989,15 +989,8 @@ function ChessBoardInner() {
   // the tap-to-select / tap-to-move flow above. Pointer Events give us a
   // single API that covers mouse, touch and pen.
   const DRAG_THRESHOLD_PX = 6;
-  const [dragPiece, setDragPiece] = useState<{
-    row: number;
-    col: number;
-    piece: string;
-    pointerId: number;
-    pointerType: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [dragPiece, setDragPiece] = useState<DragPieceState | null>(null);
+  const [hoveredSquare, setHoveredSquare] = useState<[number, number] | null>(null);
   const pendingDragRef = useRef<{
     row: number;
     col: number;
@@ -1053,6 +1046,8 @@ function ChessBoardInner() {
         safeHaptic("pickup");
         selectSquare([pending.row, pending.col]);
         const yOffset = pending.pointerType === "touch" ? -30 : 0;
+        const initialHover = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
+        setHoveredSquare(initialHover);
         setDragPiece({
           row: pending.row,
           col: pending.col,
@@ -1061,13 +1056,16 @@ function ChessBoardInner() {
           pointerType: pending.pointerType,
           x: e.clientX,
           y: e.clientY + yOffset,
+          hoveredSquare: initialHover,
         });
       }
       return;
     }
     if (dragPiece && dragPiece.pointerId === e.pointerId) {
       const yOffset = dragPiece.pointerType === "touch" ? -30 : 0;
-      setDragPiece((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY + yOffset } : prev));
+      const target = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
+      setHoveredSquare(target);
+      setDragPiece((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY + yOffset, hoveredSquare: target } : prev));
     }
   };
 
@@ -1082,6 +1080,7 @@ function ChessBoardInner() {
     const yOffset = dragPiece.pointerType === "touch" ? -30 : 0;
     const target = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
     setDragPiece(null);
+    setHoveredSquare(null);
 
     if (!target) {
       safeHaptic("error");
@@ -1123,6 +1122,8 @@ function ChessBoardInner() {
     const touch = e.touches[0];
     safeHaptic("pickup");
     selectSquare([row, col]);
+    const initialHover = squareFromPoint(touch.clientX, touch.clientY - 30) || squareFromPoint(touch.clientX, touch.clientY);
+    setHoveredSquare(initialHover);
     setDragPiece({
       row,
       col,
@@ -1131,14 +1132,20 @@ function ChessBoardInner() {
       pointerType: "touch",
       x: touch.clientX,
       y: touch.clientY - 30, // -30px Y-axis offset so target square remains visible
+      hoveredSquare: initialHover,
     });
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
     if (!dragPiece) return;
+    if (e.cancelable) e.preventDefault();
     const touch = e.touches[0];
     if (!touch) return;
-    setDragPiece((prev) => (prev ? { ...prev, x: touch.clientX, y: touch.clientY - 30 } : null));
+    const target =
+      squareFromPoint(touch.clientX, touch.clientY - 30) ||
+      squareFromPoint(touch.clientX, touch.clientY);
+    setHoveredSquare(target);
+    setDragPiece((prev) => (prev ? { ...prev, x: touch.clientX, y: touch.clientY - 30, hoveredSquare: target } : null));
   };
 
   const handleTouchEnd = async (e: React.TouchEvent) => {
@@ -1146,6 +1153,7 @@ function ChessBoardInner() {
     const from: [number, number] = [dragPiece.row, dragPiece.col];
     const changedTouch = e.changedTouches[0];
     setDragPiece(null);
+    setHoveredSquare(null);
 
     if (!changedTouch) return;
     const target =
@@ -1182,7 +1190,10 @@ function ChessBoardInner() {
 
   const handlePointerCancel = (e: React.PointerEvent) => {
     if (pendingDragRef.current?.pointerId === e.pointerId) pendingDragRef.current = null;
-    if (dragPiece?.pointerId === e.pointerId) setDragPiece(null);
+    if (dragPiece?.pointerId === e.pointerId) {
+      setDragPiece(null);
+      setHoveredSquare(null);
+    }
   };
 
   const handlePromotion = async (piece: string) => {
@@ -2021,6 +2032,12 @@ function ChessBoardInner() {
                       dragPiece !== null &&
                       dragPiece.row === actualRow &&
                       dragPiece.col === actualCol;
+                    const isHoveredTarget =
+                      dragPiece !== null &&
+                      hoveredSquare !== null &&
+                      hoveredSquare[0] === actualRow &&
+                      hoveredSquare[1] === actualCol;
+                    const isLegalHover = isHoveredTarget && possible;
 
                     const isCursor =
                       cursor !== null && cursor[0] === actualRow && cursor[1] === actualCol;
@@ -2039,6 +2056,7 @@ function ChessBoardInner() {
                       <div
                         key={`${rowIndex}-${colIndex}`}
                         data-testid={`square-${actualRow}-${actualCol}`}
+                        data-snap-preview={isLegalHover ? "true" : undefined}
                         data-premove={isPremoveSource ? "source" : isPremoveDest ? "dest" : undefined}
                         role="gridcell"
                         tabIndex={0}
@@ -2054,6 +2072,8 @@ function ChessBoardInner() {
                           isPremoveSource ? "premove-source outline-2 outline-orange-400 -outline-offset-2" : ""
                         } ${
                           isPremoveDest ? "premove-dest outline-2 outline-cyan-300 -outline-offset-2" : ""
+                        } ${
+                          isLegalHover ? "ring-2 ring-emerald-400/60 ring-inset bg-emerald-500/10" : ""
                         }`}
                         style={
                           isCaptureSquare
@@ -2190,11 +2210,11 @@ function ChessBoardInner() {
                 />
               </div>
             )}
-            {/* Dragged ghost piece follows the pointer, elevated above the board (#253, #439) */}
+            {/* Dragged ghost piece follows the pointer, elevated above the board (#253, #439, #584) */}
             {dragPiece && boardPx > 0 && (
               <span
                 data-testid="ghost-piece-overlay"
-                className="fixed leading-none pointer-events-none z-50 ghost-piece-overlay"
+                className="fixed leading-none pointer-events-none z-50 ghost-piece-overlay cursor-grabbing transition-transform duration-75 ease-out select-none"
                 style={
                   {
                     left: dragPiece.x,
@@ -2203,9 +2223,9 @@ function ChessBoardInner() {
                     transform:
                       dragPiece.pointerType === "touch"
                         ? "translate(-50%, calc(-50% - 30px)) scale(1.2)"
-                        : "translate(-50%, -50%) scale(1.1)",
+                        : "translate(-50%, -50%) scale(1.15)",
                     filter: "drop-shadow(0 10px 15px rgba(0, 0, 0, 0.5))",
-                    transition: "transform 0.1s ease-out",
+                    transition: "transform 0.075s ease-out",
                     ...(dragPiece.piece === dragPiece.piece.toUpperCase()
                       ? WHITE_PIECE_STYLE
                       : BLACK_PIECE_STYLE),
