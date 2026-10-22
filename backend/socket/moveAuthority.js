@@ -51,7 +51,7 @@ function resolvePlayerColor(game, address) {
  * @param {"white"|"black"|null} socketColor - Verified color bound to the socket.
  * @returns {{ ok: boolean, code?: string, message?: string }}
  */
-function authorizeMove(game, socketColor) {
+function authorizeMove(game, socketColor, options = {}) {
 	if (!game) {
 		return { ok: false, code: "game-not-found", message: "Game not found" };
 	}
@@ -68,6 +68,30 @@ function authorizeMove(game, socketColor) {
 	if (game.current_turn !== socketColor) {
 		return { ok: false, code: "not-your-turn", message: "It is not your turn" };
 	}
+
+	// Move timing and burst validation (Issue #583)
+	if (options && options.checkTiming !== false) {
+		const gameCode = game.game_code || game.id || options.gameCode;
+		if (gameCode) {
+			const timingResult = validateMoveTiming({
+				gameCode,
+				color: socketColor,
+				game,
+				...options,
+			});
+			if (!timingResult.ok) {
+				return timingResult;
+			}
+			if (timingResult.isPremove) {
+				return {
+					ok: true,
+					isPremove: true,
+					clampedDurationMs: timingResult.clampedDurationMs,
+				};
+			}
+		}
+	}
+
 	return { ok: true };
 }
 
@@ -284,6 +308,185 @@ function clearMoveSubmissionTimestamps(gameCode) {
 	}
 }
 
+
+const BURST_THRESHOLD_MS = 40;
+const MIN_PREMOVE_DURATION_MS = 10;
+
+// Per-game state: last move completion timestamp
+const lastOpponentMoveTimestamps = new Map();
+
+// Per-game state: pending premoves Map<gameCode, Map<color, PremoveRecord>>
+const pendingPremoves = new Map();
+
+function recordOpponentMoveTimestamp(gameCode, timestamp = Date.now()) {
+	if (!gameCode) return timestamp;
+	lastOpponentMoveTimestamps.set(gameCode, timestamp);
+	return timestamp;
+}
+
+function getLastOpponentMoveTimestamp(gameCode) {
+	if (!gameCode) return null;
+	return lastOpponentMoveTimestamps.get(gameCode) || null;
+}
+
+function registerPremove(gameCode, color, moveData = {}, registrationTimestamp = Date.now()) {
+	if (!gameCode || !color) return null;
+	if (!pendingPremoves.has(gameCode)) {
+		pendingPremoves.set(gameCode, new Map());
+	}
+	const premoveRecord = {
+		from: moveData.from,
+		to: moveData.to,
+		promotion: moveData.promotion || null,
+		registrationTimestamp,
+		registeredAt: new Date(registrationTimestamp).toISOString(),
+	};
+	pendingPremoves.get(gameCode).set(color, premoveRecord);
+	return premoveRecord;
+}
+
+function getPremove(gameCode, color) {
+	if (!gameCode || !color) return null;
+	const gamePremoves = pendingPremoves.get(gameCode);
+	if (!gamePremoves) return null;
+	return gamePremoves.get(color) || null;
+}
+
+function consumePremove(gameCode, color) {
+	if (!gameCode || !color) return null;
+	const gamePremoves = pendingPremoves.get(gameCode);
+	if (!gamePremoves) return null;
+	const premove = gamePremoves.get(color);
+	gamePremoves.delete(color);
+	return premove || null;
+}
+
+function clearPremove(gameCode, color) {
+	if (!gameCode) return;
+	const gamePremoves = pendingPremoves.get(gameCode);
+	if (!gamePremoves) return;
+	if (color) {
+		gamePremoves.delete(color);
+	} else {
+		pendingPremoves.delete(gameCode);
+	}
+}
+
+function clearGameTimingState(gameCode) {
+	if (!gameCode) return;
+	lastOpponentMoveTimestamps.delete(gameCode);
+	pendingPremoves.delete(gameCode);
+	clearMoveSubmissionTimestamps(gameCode);
+}
+
+/**
+ * Validate move timing bursts and client premoves (Issue #583).
+ *
+ * Enforces rate clamping:
+ * - If not a registered premove and delta from last opponent move < 40ms,
+ *   rejects with RATE_LIMITED_MOVE_BURST.
+ * - If marked as premove, verifies premoveRegistrationTimestamp < lastOpponentMoveTimestamp.
+ *   If valid, clamps turn duration to minimum 10ms.
+ * - Logs anomalies to antiCheatService if provided.
+ */
+function validateMoveTiming({
+	gameCode,
+	color,
+	game = null,
+	isPremove = false,
+	premoveRegistrationTimestamp = null,
+	submissionTimestamp = Date.now(),
+	lastOpponentMoveTimestamp = null,
+	clientIp = null,
+	walletAddress = null,
+	antiCheatService = null,
+	burstThresholdMs = BURST_THRESHOLD_MS,
+	minPremoveDurationMs = MIN_PREMOVE_DURATION_MS,
+} = {}) {
+	const lastMoveTime =
+		lastOpponentMoveTimestamp !== null && lastOpponentMoveTimestamp !== undefined
+			? lastOpponentMoveTimestamp
+			: getLastOpponentMoveTimestamp(gameCode);
+
+	// If no previous move has occurred (e.g. first move of the game), no burst violation
+	if (lastMoveTime == null) {
+		return { ok: true, isPremove: false, deltaMs: null };
+	}
+
+	const deltaMs = submissionTimestamp - lastMoveTime;
+
+	// Check if this player has a pre-registered premove stored on the server
+	const storedPremove = getPremove(gameCode, color);
+	const resolvedIsPremove = Boolean(isPremove || storedPremove);
+	const regTimestamp =
+		premoveRegistrationTimestamp !== null && premoveRegistrationTimestamp !== undefined
+			? premoveRegistrationTimestamp
+			: (storedPremove ? storedPremove.registrationTimestamp : null);
+
+	if (!resolvedIsPremove) {
+		// Non-premove submission
+		if (deltaMs < burstThresholdMs) {
+			const playerAddr =
+				walletAddress ||
+				(game ? (color === "white" ? game.player_white_address : game.player_black_address) : null);
+
+			if (antiCheatService && typeof antiCheatService.logBurstAttempt === "function") {
+				antiCheatService.logBurstAttempt({
+					gameCode,
+					playerAddress: playerAddr,
+					clientIp,
+					deltaMs,
+					reason: "RATE_LIMITED_MOVE_BURST",
+					severity: "high",
+				});
+			}
+
+			return {
+				ok: false,
+				code: "RATE_LIMITED_MOVE_BURST",
+				message: `Move rejected: move submission rate (${deltaMs}ms) exceeds allowable burst threshold (${burstThresholdMs}ms)`,
+				deltaMs,
+			};
+		}
+
+		return { ok: true, isPremove: false, deltaMs };
+	}
+
+	// Premove submission: verify that the premove was registered BEFORE the opponent's move landed
+	if (regTimestamp == null || regTimestamp >= lastMoveTime) {
+		const playerAddr =
+			walletAddress ||
+			(game ? (color === "white" ? game.player_white_address : game.player_black_address) : null);
+
+		if (antiCheatService && typeof antiCheatService.logBurstAttempt === "function") {
+			antiCheatService.logBurstAttempt({
+				gameCode,
+				playerAddress: playerAddr,
+				clientIp,
+				deltaMs,
+				reason: "INVALID_PREMOVE_BURST",
+				severity: "high",
+			});
+		}
+
+		return {
+			ok: false,
+			code: "RATE_LIMITED_MOVE_BURST",
+			message: "Move rejected: premove registration timestamp invalid or after opponent move",
+			deltaMs,
+		};
+	}
+
+	// Valid premove: clamp turn duration to minimum (10ms)
+	const clampedDurationMs = Math.max(minPremoveDurationMs, deltaMs);
+	return {
+		ok: true,
+		isPremove: true,
+		deltaMs,
+		clampedDurationMs,
+	};
+}
+
 module.exports = {
 	verifySocketToken,
 	resolvePlayerColor,
@@ -295,4 +498,14 @@ module.exports = {
 	recordMoveSubmissionTimestamp,
 	getMoveSubmissionTimestamps,
 	clearMoveSubmissionTimestamps,
+	BURST_THRESHOLD_MS,
+	MIN_PREMOVE_DURATION_MS,
+	recordOpponentMoveTimestamp,
+	getLastOpponentMoveTimestamp,
+	registerPremove,
+	getPremove,
+	consumePremove,
+	clearPremove,
+	clearGameTimingState,
+	validateMoveTiming,
 };

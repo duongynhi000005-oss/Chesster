@@ -34,7 +34,11 @@ const {
   handleDisconnect,
   handleReconnect,
   reconcileGameState,
+  recordOpponentMoveTimestamp,
+  registerPremove,
+  consumePremove,
 } = require("./socket/moveAuthority");
+const antiCheatService = require("./services/antiCheatService");
 const gameController = require("./controllers/gameController");
 const { createRateLimiter } = require("./middleware/rateLimiter");
 const { sanitizeInput } = require("./middleware/sanitizeInput");
@@ -318,7 +322,12 @@ io.on("connection", (socket) => {
   // was bound to a player color via an authenticated join and it is that
   // player's turn in an active game; otherwise it is rejected without touching
   // game state. This blocks socket injection and client-side move spoofing.
-  socket.on("make-move", async ({ gameCode, from, to, promotion } = {}) => {
+  socket.on("register-premove", ({ gameCode, from, to, promotion, timestamp } = {}) => {
+    if (!gameCode || !socket.data.playerColor) return;
+    registerPremove(gameCode, socket.data.playerColor, { from, to, promotion }, timestamp || Date.now());
+  });
+
+  socket.on("make-move", async ({ gameCode, from, to, promotion, isPremove, premoveTimestamp } = {}) => {
     const moveStartedAt = Date.now();
     if (!gameCode) return;
 
@@ -330,7 +339,14 @@ io.on("connection", (socket) => {
 
     try {
       const game = await gameModel.getGame(gameCode);
-      const gate = authorizeMove(game, boundColor);
+      const gate = authorizeMove(game, boundColor, {
+        isPremove,
+        premoveRegistrationTimestamp: premoveTimestamp,
+        submissionTimestamp: moveStartedAt,
+        clientIp: socket.handshake?.address,
+        walletAddress: socket.data?.address,
+        antiCheatService,
+      });
       if (!gate.ok) {
         socket.emit("move-rejected", { gameCode, reason: gate.code, message: gate.message });
         return;
@@ -339,6 +355,8 @@ io.on("connection", (socket) => {
       const moverColor = game.current_turn;
       const updated = await gameModel.makeMove(gameCode, from, to, promotion);
       metricsRoutes.observeMoveLatency(moveStartedAt);
+      recordOpponentMoveTimestamp(gameCode, moveStartedAt);
+      consumePremove(gameCode, boundColor);
       // Invalidate the reconcile/reconnect snapshot cache so a client that
       // reconciles immediately after this move sees it, not a stale snapshot
       // (Issue #434).

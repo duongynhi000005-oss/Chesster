@@ -606,6 +606,55 @@ class AntiCheatService {
 		}
 		return analysis;
 	}
+
+	/**
+	 * Log suspicious move timing burst attempt to anti_cheat_logs table (Issue #583).
+	 *
+	 * @param {object} payload - { gameId, gameCode, playerAddress, clientIp, deltaMs, move, reason, severity }
+	 * @returns {Promise<object>} Logged telemetry summary
+	 */
+	async logBurstAttempt({
+		gameId,
+		gameCode,
+		playerAddress,
+		clientIp,
+		deltaMs,
+		move,
+		reason = "RATE_LIMITED_MOVE_BURST",
+		severity = "high",
+	} = {}) {
+		const timestampMs = Date.now();
+		try {
+			if (this.db && typeof this.db.from === "function") {
+				const { error } = await this.db.from("anti_cheat_logs").insert({
+					game_id: gameId || gameCode,
+					player_address: playerAddress,
+					client_ip: clientIp || null,
+					delta_ms: deltaMs,
+					event_type: "move_timing_burst",
+					reason,
+					severity,
+					event_data: {
+						gameCode,
+						move,
+						deltaMs,
+						timestampMs,
+					},
+					created_at: new Date(timestampMs).toISOString(),
+				});
+				if (error) {
+					this.logger.warn(`[AntiCheat] Failed to write to anti_cheat_logs: ${error.message}`);
+				}
+			}
+		} catch (err) {
+			this.logger.warn(`[AntiCheat] Exception writing to anti_cheat_logs: ${err.message}`);
+		}
+		return { logged: true, timestampMs, deltaMs, reason };
+	}
+
+	async logMoveTimingBurstAnomaly(params) {
+		return this.logBurstAttempt(params);
+	}
 }
 
 module.exports = new AntiCheatService();
