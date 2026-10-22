@@ -399,7 +399,7 @@ class TimerService {
 	 * @param {"white"|"black"} color
 	 * @param {number} graceSeconds
 	 */
-	startReconnectGrace(gameCode, color, graceSeconds = RECONNECT_GRACE_SECONDS) {
+	startReconnectGrace(gameCode, color, graceSeconds = RECONNECT_GRACE_SECONDS, opponentAddress = null) {
 		const key = `${gameCode}:${color}`;
 		this.cancelReconnectGrace(gameCode, color);
 
@@ -407,9 +407,24 @@ class TimerService {
 			this.player_disconnect_timers.delete(key);
 			try {
 				const gameModel = require("../models/gameModel");
-				const game = await gameModel.forfeitByDisconnect(gameCode, color);
+				let game;
+				if (opponentAddress && typeof gameModel.updateGameResult === "function") {
+					game = await gameModel.updateGameResult(gameCode, { winner: opponentAddress, reason: "abandonment" });
+				} else {
+					game = await gameModel.forfeitByDisconnect(gameCode, color);
+				}
 				await require("../models/userModel").invalidateProfilesForGame(game);
 				this.clearClock(gameCode);
+				if (opponentAddress) {
+					try {
+						const escrowService = require("./escrowService");
+						if (typeof escrowService.resolveMatch === "function") {
+							await escrowService.resolveMatch(gameCode, opponentAddress).catch((err) => {
+								console.error(`[TimerService] resolveMatch failed for ${gameCode}:`, err.message);
+							});
+						}
+					} catch (_) {}
+				}
 				if (this.io && game) {
 					this.io.to(gameCode).emit("game-update", game);
 					this.io.to(gameCode).emit("presence-update", {

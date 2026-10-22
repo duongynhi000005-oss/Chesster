@@ -6,6 +6,12 @@ class SessionService {
 		this.activeJti = new Map(); // In-memory fallback for active JTI per wallet
 		this.ipBindings = new Map(); // In-memory fallback for JTI -> IP subnet bindings
 		this.blacklist = new Map(); // In-memory blacklist for revoked JTIs (JTI -> expireAt timestamp)
+		this.disconnectionTimers = new Map(); // Key: `${gameId}:${playerAddress}`
+		this.io = null;
+	}
+
+	init(io) {
+		this.io = io;
 	}
 
 	async getClient() {
@@ -203,11 +209,154 @@ class SessionService {
 		return issuedAtSeconds * 1000 <= revokedAt;
 	}
 
+	/**
+	 * Start a disconnection grace countdown for an active player in a game.
+	 * Emits OPPONENT_DISCONNECTED event to the game room with gracePeriodRemainingMs.
+	 *
+	 * @param {string} gameId - Game code / ID
+	 * @param {string} playerAddress - Wallet address of disconnected player
+	 * @param {string} opponentAddress - Wallet address of the active opponent
+	 * @param {Function} [onTimeout] - Optional callback to invoke on timer expiration
+	 * @param {number} [graceDurationMs=60000] - Grace period in milliseconds (default 60s)
+	 * @returns {object|null} Timer state metadata
+	 */
+	startDisconnectionGrace(gameId, playerAddress, opponentAddress, onTimeout, graceDurationMs = 60000) {
+		if (!gameId || !playerAddress) return null;
+
+		const key = `${gameId}:${playerAddress}`;
+		this.cancelDisconnectionGrace(gameId, playerAddress, false);
+
+		const expiresAt = Date.now() + graceDurationMs;
+
+		if (this.io) {
+			this.io.to(gameId).emit("OPPONENT_DISCONNECTED", {
+				gameId,
+				playerAddress,
+				opponentAddress,
+				gracePeriodRemainingMs: graceDurationMs,
+			});
+			this.io.to(gameId).emit("opponent_disconnected", {
+				gameCode: gameId,
+				playerAddress,
+				opponentAddress,
+				gracePeriodRemainingMs: graceDurationMs,
+			});
+		}
+
+		const timeout = setTimeout(async () => {
+			this.disconnectionTimers.delete(key);
+			if (typeof onTimeout === "function") {
+				try {
+					await onTimeout();
+				} catch (err) {
+					console.error(`[SessionService] onTimeout callback error for ${key}:`, err.message);
+				}
+			} else {
+				try {
+					const gameModel = require("../models/gameModel");
+					if (typeof gameModel.updateGameResult === "function") {
+						await gameModel.updateGameResult(gameId, { winner: opponentAddress, reason: "abandonment" });
+					}
+					if (opponentAddress) {
+						try {
+							const escrowService = require("./escrowService");
+							if (typeof escrowService.resolveMatch === "function") {
+								await escrowService.resolveMatch(gameId, opponentAddress).catch((err) => {
+									console.error(`[SessionService] resolveMatch failed for ${gameId}:`, err.message);
+								});
+							}
+						} catch (_) {}
+					}
+					if (this.io) {
+						this.io.to(gameId).emit("game_over", {
+							gameCode: gameId,
+							winner: opponentAddress,
+							reason: "abandonment",
+						});
+					}
+				} catch (err) {
+					console.error(`[SessionService] auto-forfeit failed for ${key}:`, err.message);
+				}
+			}
+		}, graceDurationMs);
+
+		const entry = {
+			timeout,
+			expiresAt,
+			graceDurationMs,
+			gameId,
+			playerAddress,
+			opponentAddress,
+		};
+		this.disconnectionTimers.set(key, entry);
+		return entry;
+	}
+
+	/**
+	 * Cancel a pending disconnection grace timer when a player reconnects.
+	 * Emits OPPONENT_RECONNECTED event to the game room.
+	 *
+	 * @param {string} gameId
+	 * @param {string} playerAddress
+	 * @param {boolean} [emitReconnected=true]
+	 * @returns {boolean} true if an active timer was cancelled
+	 */
+	cancelDisconnectionGrace(gameId, playerAddress, emitReconnected = true) {
+		const key = `${gameId}:${playerAddress}`;
+		const entry = this.disconnectionTimers.get(key);
+		if (entry) {
+			if (entry.timeout) {
+				clearTimeout(entry.timeout);
+			}
+			this.disconnectionTimers.delete(key);
+			if (emitReconnected && this.io) {
+				this.io.to(gameId).emit("OPPONENT_RECONNECTED", {
+					gameId,
+					playerAddress,
+				});
+				this.io.to(gameId).emit("opponent_reconnected", {
+					gameCode: gameId,
+					playerAddress,
+				});
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Check if a player in a game has a pending disconnection grace timer.
+	 *
+	 * @param {string} gameId
+	 * @param {string} playerAddress
+	 * @returns {boolean}
+	 */
+	isPendingDisconnection(gameId, playerAddress) {
+		return this.disconnectionTimers.has(`${gameId}:${playerAddress}`);
+	}
+
+	/**
+	 * Get the remaining grace duration in milliseconds for a disconnected player.
+	 *
+	 * @param {string} gameId
+	 * @param {string} playerAddress
+	 * @returns {number} Remaining milliseconds, or 0 if not active
+	 */
+	getGraceRemainingMs(gameId, playerAddress) {
+		const entry = this.disconnectionTimers.get(`${gameId}:${playerAddress}`);
+		if (!entry) return 0;
+		return Math.max(0, entry.expiresAt - Date.now());
+	}
+
 	resetLocalState() {
 		this.revokedAfter.clear();
 		this.activeJti.clear();
 		this.ipBindings.clear();
 		this.blacklist.clear();
+		for (const [, entry] of this.disconnectionTimers) {
+			if (entry && entry.timeout) clearTimeout(entry.timeout);
+		}
+		this.disconnectionTimers.clear();
 	}
 }
 

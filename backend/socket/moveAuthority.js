@@ -99,6 +99,14 @@ async function handleDisconnect(deps, gameCode, playerColor) {
 		return { shouldStartGrace: false, game };
 	}
 
+	if (deps.sessionService && typeof deps.sessionService.startDisconnectionGrace === "function") {
+		const playerAddress = playerColor === "white" ? game.player_white_address : game.player_black_address;
+		const opponentAddress = playerColor === "white" ? game.player_black_address : game.player_white_address;
+		if (playerAddress && opponentAddress) {
+			deps.sessionService.startDisconnectionGrace(gameCode, playerAddress, opponentAddress);
+		}
+	}
+
 	return { shouldStartGrace: true, game };
 }
 
@@ -144,7 +152,12 @@ async function handleReconnect(deps, gameCode, walletAddress) {
 
 	// Cancel the pending auto-forfeit grace timer now that the player is
 	// provably back, before any further await lets it race against firing.
-	timerService.cancelReconnectGrace(gameCode, playerColor);
+	if (timerService && typeof timerService.cancelReconnectGrace === "function") {
+		timerService.cancelReconnectGrace(gameCode, playerColor);
+	}
+	if (deps.sessionService && typeof deps.sessionService.cancelDisconnectionGrace === "function") {
+		deps.sessionService.cancelDisconnectionGrace(gameCode, walletAddress);
+	}
 
 	return { ok: true, game, playerColor };
 }

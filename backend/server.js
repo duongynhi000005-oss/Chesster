@@ -417,7 +417,8 @@ io.on("connection", (socket) => {
     // fresher reconnect (e.g. rapid refresh / duplicate tabs).
     if (presence[playerColor].socketId !== socket.id) return;
 
-    const { shouldStartGrace } = await handleDisconnect({ gameModel }, gameCode, playerColor);
+    const sessionService = require("./services/sessionService");
+    const { shouldStartGrace } = await handleDisconnect({ gameModel, sessionService }, gameCode, playerColor);
     if (!shouldStartGrace) return;
 
     presence[playerColor].socketId = null;
@@ -488,6 +489,7 @@ io.on("connection", (socket) => {
 
       // ── 4. Cancel the reconnect grace timer ────────────────────────
       timerService.cancelReconnectGrace(gameId, playerColor);
+      require("./services/sessionService").cancelDisconnectionGrace(gameId, walletAddress);
 
       // ── 5. Rejoin the socket to the game room ─────────────────────
       socket.join(gameId);
@@ -709,6 +711,7 @@ io.on("connection", (socket) => {
 
 app.set("io", io);
 timerService.init(io);
+require("./services/sessionService").init(io);
 // Stop the auth challenge sweep timer on shutdown so the event loop exits cleanly.
 const authService = require("./services/authService");
 const botService = require("./services/botService");

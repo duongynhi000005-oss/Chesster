@@ -477,6 +477,48 @@ class GameModel {
 	}
 
 	/**
+	 * Update game result upon match termination (e.g. abandonment forfeit, resignation, resolution).
+	 *
+	 * @param {string} gameCode
+	 * @param {object} options - { winner, reason }
+	 * @returns {Promise<object>} updated game record
+	 */
+	async updateGameResult(gameCode, { winner, reason = "abandonment" } = {}) {
+		const game = await this.getGame(gameCode);
+		if (!game || game.status !== "active") return game;
+
+		// Normalize winner: if wallet address is passed, map to "white" or "black"
+		let winnerColor = winner;
+		if (winner === game.player_white_address) {
+			winnerColor = "white";
+		} else if (winner === game.player_black_address) {
+			winnerColor = "black";
+		}
+
+		const { data, error } = await supabase
+			.from("games")
+			.update({
+				status: "finished",
+				winner: winnerColor,
+				end_reason: reason,
+				...(game.wager_amount ? { escrow_status: "resolving" } : {}),
+			})
+			.eq("game_code", gameCode)
+			.select()
+			.single();
+
+		if (error) throw error;
+
+		this._settleEscrow(gameCode, data, winnerColor, reason).catch((err) => {
+			console.error(`[Escrow] _settleEscrow threw for ${gameCode}:`, err.message);
+		});
+		this._scheduleAntiCheatAnalysis(data);
+
+		console.log(`[GameModel] ${gameCode} result updated — winner=${winnerColor} (${winner}), reason=${reason}`);
+		return data;
+	}
+
+	/**
 	 * Resolve on-chain escrow for a finished game.
 	 * Players deposit XLM directly via the frontend, so we only need to call
 	 * resolveMatch (coordinator role) — or, for a disconnect auto-forfeit
@@ -550,7 +592,7 @@ class GameModel {
 			let receipt;
 			if (winner === "draw") {
 				receipt = await escrowService.resolveAsDraw(gameCode);
-			} else if (endReason === "disconnect") {
+			} else if (endReason === "disconnect" || endReason === "abandonment") {
 				// Disconnect auto-forfeit (Issue #39): route through the contract's
 				// dedicated forfeit_match entrypoint instead of resolve_match, using
 				// the on-chain address of the *disconnected* player (the losing side).
