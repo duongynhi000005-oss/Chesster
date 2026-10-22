@@ -485,4 +485,19 @@ router.get('/games/:id/stream', gameController.streamGameReplay);
  */
 router.get('/games/:id/audit-export', requireAuth, gameController.exportMatchAudit);
 
+/**
+ * @openapi
+ * /api/analytics/volume-24h:
+ *   get:
+ *     summary: Rolling 24-hour liquidity and wager volume by asset
+ *     description: Aggregates match count, unique players, and wager volume segmented by asset over the last 24 hours. Cached for 5 minutes.
+ *     tags: [Analytics]
+ *     responses:
+ *       200:
+ *         description: Rolling 24-hour volume breakdown by asset
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/analytics/volume-24h', gameController.getRolling24HourVolume);
+
 module.exports = router;

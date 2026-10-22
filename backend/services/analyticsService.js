@@ -293,10 +293,129 @@ async function aggregateHourlyMetrics(targetHour) {
 	}
 }
 
+// 5-minute cache TTL in milliseconds (Issue #582)
+const VOLUME_CACHE_TTL_MS = 5 * 60 * 1000;
+let volumeCache = {
+	data: null,
+	cachedAt: 0,
+};
+
+function clearVolumeCache() {
+	volumeCache = { data: null, cachedAt: 0 };
+}
+
+/**
+ * Standardize token asset symbols based on token_address or currency code.
+ */
+function resolveAssetSymbol(tokenAddress) {
+	if (!tokenAddress || typeof tokenAddress !== "string") return "XLM";
+	const lower = tokenAddress.toLowerCase().trim();
+	if (lower.includes("usdc") || lower.includes("circle")) return "USDC";
+	if (lower.includes("eurc")) return "EURC";
+	if (lower === "xlm" || lower === "native") return "XLM";
+	return tokenAddress.toUpperCase();
+}
+
+/**
+ * Aggregate rolling 24-hour liquidity and wager volume by asset (Issue #582).
+ *
+ * Queries games created in the last 24 hours, aggregates metrics segmented
+ * by token asset, and caches the response for 5 minutes.
+ *
+ * @param {object} [options={}]
+ * @param {boolean} [options.bypassCache=false]
+ * @param {Date|number} [options.now=Date.now()]
+ * @returns {Promise<{ window: string, timestamp: string, assets: Array<object> }>}
+ */
+async function getRolling24HourVolume(options = {}) {
+	const now = options.now ? new Date(options.now).getTime() : Date.now();
+
+	// Check 5-minute cache
+	if (!options.bypassCache && volumeCache.data && now - volumeCache.cachedAt < VOLUME_CACHE_TTL_MS) {
+		return {
+			...volumeCache.data,
+			_cached: true,
+		};
+	}
+
+	const windowStart = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+	const windowEnd = new Date(now).toISOString();
+
+	const { data: games, error } = await supabase
+		.from("games")
+		.select("status, winner, wager_amount, token_address, player_white_address, player_black_address, created_at")
+		.gte("created_at", windowStart)
+		.lte("created_at", windowEnd);
+
+	if (error) {
+		console.error("[AnalyticsService] Error fetching rolling 24h games:", error.message);
+		throw error;
+	}
+
+	const gamesList = games || [];
+
+	// Map of asset -> { totalVolume: number, matchCount: number, players: Set<string> }
+	const assetAggregates = new Map();
+
+	for (const game of gamesList) {
+		const asset = resolveAssetSymbol(game.token_address);
+		if (!assetAggregates.has(asset)) {
+			assetAggregates.set(asset, {
+				asset,
+				totalVolume: 0,
+				matchCount: 0,
+				players: new Set(),
+			});
+		}
+
+		const entry = assetAggregates.get(asset);
+		entry.matchCount++;
+
+		const wager = parseFloat(game.wager_amount) || 0;
+		entry.totalVolume += wager;
+
+		if (game.player_white_address) entry.players.add(game.player_white_address);
+		if (game.player_black_address) entry.players.add(game.player_black_address);
+	}
+
+	const assets = [];
+	for (const [asset, entry] of assetAggregates.entries()) {
+		const avgWager = entry.matchCount > 0 ? entry.totalVolume / entry.matchCount : 0;
+		assets.push({
+			asset,
+			totalVolume: entry.totalVolume.toFixed(2),
+			matchCount: entry.matchCount,
+			uniquePlayers: entry.players.size,
+			averageWager: avgWager.toFixed(2),
+		});
+	}
+
+	// Sort assets descending by totalVolume
+	assets.sort((a, b) => parseFloat(b.totalVolume) - parseFloat(a.totalVolume));
+
+	const response = {
+		window: "24h",
+		timestamp: windowEnd,
+		assets,
+	};
+
+	// Store in cache
+	volumeCache = {
+		data: response,
+		cachedAt: now,
+	};
+
+	return response;
+}
+
 module.exports = {
 	getDailyActivePlayers,
 	getDailyMatchVolume,
 	getTokenWageredSummary,
 	getDashboardSummary,
 	aggregateHourlyMetrics,
+	getRolling24HourVolume,
+	resolveAssetSymbol,
+	clearVolumeCache,
+	VOLUME_CACHE_TTL_MS,
 };

@@ -9,6 +9,7 @@ const REPLAY_HEARTBEAT_MS = 15000;
 const auditService = require("../services/auditService");
 const leaderboardService = require("../services/leaderboardService");
 const pgnService = require("../services/pgnService");
+const analyticsService = require("../services/analyticsService");
 
 const AUDIT_FORMATS = new Set(["json", "csv"]);
 
@@ -658,6 +659,15 @@ class GameController {
 			res.setHeader("X-Cache", cacheStatus);
 			res.setHeader("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
 			res.json({ success: true, data: leaderboard });
+		} catch (error) {
+			res.status(500).json({ success: false, error: error.message });
+		}
+	}
+
+	async getRolling24HourVolume(req, res) {
+		try {
+			const data = await analyticsService.getRolling24HourVolume();
+			res.json(data);
 		} catch (error) {
 			res.status(500).json({ success: false, error: error.message });
 		}
