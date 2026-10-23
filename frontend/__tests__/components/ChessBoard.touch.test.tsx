@@ -57,6 +57,8 @@ vi.mock("../../src/services/soundService", () => ({
     toggle: vi.fn().mockReturnValue(true),
     getVolume: vi.fn().mockReturnValue(0.8),
     setVolume: vi.fn(),
+    getSoundPack: vi.fn().mockReturnValue("wood"),
+    setSoundPack: vi.fn(),
     move: vi.fn(),
     capture: vi.fn(),
     castle: vi.fn(),

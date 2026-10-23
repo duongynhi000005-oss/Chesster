@@ -53,7 +53,7 @@ function tokenLabel(addr: string | null | undefined): string {
 }
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import type { AnnotationArrow, AnnotationColor, SquareHighlight } from "../types/chess";
+import type { AnnotationArrow, AnnotationColor, SquareHighlight, PieceDragState } from "../types/chess";
 import { BoardAnnotations } from "./BoardAnnotations";
 import {
   getPossibleMoves,
@@ -133,14 +133,6 @@ const BLACK_PIECE_STYLE: React.CSSProperties = {
   WebkitTextStroke: "0.5px #fff",
 };
 
-// ── Board annotation colors (#252) ─────────────────────────────────────────────
-// Right-click plain = blue, Shift = green, Alt = red, Ctrl/Cmd = yellow.
-const ANNOTATION_COLORS: Record<AnnotationColor, string> = {
-  blue: "#3689e6",
-  green: "#22ac38",
-  red: "#e0403c",
-  yellow: "#e6c729",
-};
 
 function colorFromModifiers(e: {
   shiftKey: boolean;
@@ -989,15 +981,8 @@ function ChessBoardInner() {
   // the tap-to-select / tap-to-move flow above. Pointer Events give us a
   // single API that covers mouse, touch and pen.
   const DRAG_THRESHOLD_PX = 6;
-  const [dragPiece, setDragPiece] = useState<{
-    row: number;
-    col: number;
-    piece: string;
-    pointerId: number;
-    pointerType: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [dragPiece, setDragPiece] = useState<PieceDragState | null>(null);
+  const [dragHoveredSquare, setDragHoveredSquare] = useState<[number, number] | null>(null);
   const pendingDragRef = useRef<{
     row: number;
     col: number;
@@ -1062,12 +1047,16 @@ function ChessBoardInner() {
           x: e.clientX,
           y: e.clientY + yOffset,
         });
+        const target = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
+        setDragHoveredSquare(target);
       }
       return;
     }
     if (dragPiece && dragPiece.pointerId === e.pointerId) {
       const yOffset = dragPiece.pointerType === "touch" ? -30 : 0;
       setDragPiece((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY + yOffset } : prev));
+      const target = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
+      setDragHoveredSquare(target);
     }
   };
 
@@ -1082,6 +1071,7 @@ function ChessBoardInner() {
     const yOffset = dragPiece.pointerType === "touch" ? -30 : 0;
     const target = squareFromPoint(e.clientX, e.clientY + yOffset) || squareFromPoint(e.clientX, e.clientY);
     setDragPiece(null);
+    setDragHoveredSquare(null);
 
     if (!target) {
       safeHaptic("error");
@@ -1139,6 +1129,10 @@ function ChessBoardInner() {
     const touch = e.touches[0];
     if (!touch) return;
     setDragPiece((prev) => (prev ? { ...prev, x: touch.clientX, y: touch.clientY - 30 } : null));
+    const target =
+      squareFromPoint(touch.clientX, touch.clientY - 30) ||
+      squareFromPoint(touch.clientX, touch.clientY);
+    setDragHoveredSquare(target);
   };
 
   const handleTouchEnd = async (e: React.TouchEvent) => {
@@ -1146,6 +1140,7 @@ function ChessBoardInner() {
     const from: [number, number] = [dragPiece.row, dragPiece.col];
     const changedTouch = e.changedTouches[0];
     setDragPiece(null);
+    setDragHoveredSquare(null);
 
     if (!changedTouch) return;
     const target =
@@ -1182,7 +1177,10 @@ function ChessBoardInner() {
 
   const handlePointerCancel = (e: React.PointerEvent) => {
     if (pendingDragRef.current?.pointerId === e.pointerId) pendingDragRef.current = null;
-    if (dragPiece?.pointerId === e.pointerId) setDragPiece(null);
+    if (dragPiece?.pointerId === e.pointerId) {
+      setDragPiece(null);
+      setDragHoveredSquare(null);
+    }
   };
 
   const handlePromotion = async (piece: string) => {
@@ -1307,14 +1305,6 @@ function ChessBoardInner() {
     }
   };
 
-  // Square center in on-screen pixels, respecting the board's flip state,
-  // for positioning the SVG annotation overlay.
-  const squareCenterPx = (row: number, col: number) => {
-    const rowIndex = playerColor === "black" ? 7 - row : row;
-    const colIndex = playerColor === "black" ? 7 - col : col;
-    const squareSize = boardPx / 8;
-    return { x: colIndex * squareSize + squareSize / 2, y: rowIndex * squareSize + squareSize / 2 };
-  };
 
   const displayBoard =
     (playerColor === "black") !== flipped
@@ -2022,6 +2012,15 @@ function ChessBoardInner() {
                       dragPiece.row === actualRow &&
                       dragPiece.col === actualCol;
 
+                    const isDragHovered =
+                      dragPiece !== null &&
+                      dragHoveredSquare !== null &&
+                      dragHoveredSquare[0] === actualRow &&
+                      dragHoveredSquare[1] === actualCol;
+
+                    const isSnapTarget = isDragHovered && possible;
+                    const isDragDimmed = dragPiece !== null && !possible && !selected && !isDragSource;
+
                     const isCursor =
                       cursor !== null && cursor[0] === actualRow && cursor[1] === actualCol;
 
@@ -2040,11 +2039,12 @@ function ChessBoardInner() {
                         key={`${rowIndex}-${colIndex}`}
                         data-testid={`square-${actualRow}-${actualCol}`}
                         data-premove={isPremoveSource ? "source" : isPremoveDest ? "dest" : undefined}
+                        data-snap-preview={isSnapTarget ? "true" : undefined}
                         role="gridcell"
                         tabIndex={0}
                         aria-label={squareAriaLabel(piece, actualRow, actualCol)}
                         aria-selected={selected === true || isCursor}
-                        className={`board-square relative flex items-center justify-center cursor-pointer transition-[filter] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-blue-400 focus-visible:-outline-offset-2 ${
+                        className={`board-square relative flex items-center justify-center cursor-pointer transition-[filter,opacity] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-blue-400 focus-visible:-outline-offset-2 ${
                           isLight ? "bg-(--sq-light)" : "bg-(--sq-dark)"
                         } ${selected ? "square-selected bg-yellow-400/75" : ""} ${
                           isKingInCheck ? "square-check bg-red-500/80" : ""
@@ -2054,6 +2054,10 @@ function ChessBoardInner() {
                           isPremoveSource ? "premove-source outline-2 outline-orange-400 -outline-offset-2" : ""
                         } ${
                           isPremoveDest ? "premove-dest outline-2 outline-cyan-300 -outline-offset-2" : ""
+                        } ${
+                          isSnapTarget ? "ring-2 ring-emerald-400/60 ring-inset bg-emerald-500/10 shadow-[inset_0_0_12px_rgba(52,211,153,0.3)] z-10" : ""
+                        } ${
+                          isDragDimmed ? "opacity-75" : ""
                         }`}
                         style={
                           isCaptureSquare
@@ -2190,11 +2194,11 @@ function ChessBoardInner() {
                 />
               </div>
             )}
-            {/* Dragged ghost piece follows the pointer, elevated above the board (#253, #439) */}
+            {/* Dragged ghost piece follows the pointer, elevated above the board (#253, #439, #584) */}
             {dragPiece && boardPx > 0 && (
               <span
                 data-testid="ghost-piece-overlay"
-                className="fixed leading-none pointer-events-none z-50 ghost-piece-overlay"
+                className="fixed leading-none pointer-events-none z-50 ghost-piece-overlay transition-transform duration-75 ease-out"
                 style={
                   {
                     left: dragPiece.x,
@@ -2203,9 +2207,9 @@ function ChessBoardInner() {
                     transform:
                       dragPiece.pointerType === "touch"
                         ? "translate(-50%, calc(-50% - 30px)) scale(1.2)"
-                        : "translate(-50%, -50%) scale(1.1)",
-                    filter: "drop-shadow(0 10px 15px rgba(0, 0, 0, 0.5))",
-                    transition: "transform 0.1s ease-out",
+                        : "translate(-50%, -50%) scale(1.15)",
+                    filter: "drop-shadow(0 12px 20px rgba(0, 0, 0, 0.6))",
+                    transition: "transform 0.075s ease-out",
                     ...(dragPiece.piece === dragPiece.piece.toUpperCase()
                       ? WHITE_PIECE_STYLE
                       : BLACK_PIECE_STYLE),
