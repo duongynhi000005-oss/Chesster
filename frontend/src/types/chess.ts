@@ -20,3 +20,21 @@ export interface AnnotationArrow {
 	to: [number, number];
 	color: AnnotationColor;
 }
+
+/**
+ * Drag and drop state metadata for piece ghost and snap preview (#584).
+ */
+export interface PieceDragState {
+	row: number;
+	col: number;
+	piece: string;
+	pointerId: number;
+	pointerType: string;
+	x: number;
+	y: number;
+}
+
+export interface SnapTargetPreview {
+	square: [number, number];
+	isLegal: boolean;
+}
